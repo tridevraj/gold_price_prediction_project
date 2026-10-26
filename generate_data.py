@@ -27,9 +27,10 @@ Design notes:
       is realistic (~0.4-0.85) instead of near-perfect by construction.
 """
 
+from pathlib import Path
+from datetime import date
 import numpy as np
 import pandas as pd
-from datetime import date
 
 np.random.seed(42)
 
@@ -148,7 +149,8 @@ df = pd.DataFrame({
 })
 
 if __name__ == "__main__":
-    out_path = "data/gold_price_dataset.csv"
+    out_path = Path(__file__).resolve().parent / "data" / "gold_price_dataset.csv"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
     print(f"Saved {len(df)} rows to {out_path}")
     print(df.head())

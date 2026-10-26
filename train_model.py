@@ -9,12 +9,13 @@ Pipeline:
     3. Correlation analysis (heatmap + feature selection)
     4. Train/test split (time-based, no shuffling -> realistic for time series)
     5. Train Random Forest Regressor
-    6. Evaluate: R2, MAE, RMSE, MAPE, "prediction reliability %"
+    6. Evaluate: R2, MAE, RMSE, and MAPE
     7. Feature importance
     8. Save plots, model, and metrics report
 """
 
 import json
+from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
@@ -28,8 +29,10 @@ from sklearn.metrics import (
     mean_absolute_percentage_error,
 )
 
-DATA_PATH = "data/gold_price_dataset.csv"
-OUT_DIR = "outputs"
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_PATH = PROJECT_DIR / "data" / "gold_price_dataset.csv"
+OUT_DIR = PROJECT_DIR / "outputs"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 sns.set_style("whitegrid")
 plt.rcParams["figure.dpi"] = 110
@@ -38,18 +41,19 @@ plt.rcParams["figure.dpi"] = 110
 # 1. LOAD DATA
 # =================================================================
 df = pd.read_csv(DATA_PATH, parse_dates=["Date"])
+required = {"Date", "Gold_Price_INR", "Silver_Price", "USD_Index", "Crude_Oil_Price", "SP500", "Interest_Rate", "Inflation_Rate", "VIX", "USD_INR"}
+missing = required.difference(df.columns)
+if missing:
+    raise ValueError(f"Dataset is missing required columns: {sorted(missing)}")
+if df["Date"].isna().any() or df["Date"].duplicated().any():
+    raise ValueError("Date must contain valid, unique observations")
 df = df.sort_values("Date").reset_index(drop=True)
 print(f"Loaded dataset: {df.shape[0]} rows, {df.shape[1]} columns")
 
-# NOTE ON DESIGN: Gold_Price_INR is modeled as a function of same-day economic
-# and financial indicators (its fundamental drivers), not of its own past
-# values. This matches the project brief ("predict gold prices using economic
-# and financial datasets") and avoids a common pitfall with tree-based models
-# on trending series: Random Forest cannot extrapolate a price trend beyond
-# the range it was trained on, so using lagged gold price / moving averages
-# with a chronological split produces misleadingly unstable results. Using
-# the macro drivers directly with a random train/test split gives a fair,
-# stable measure of how well the model captures the underlying relationship.
+# NOTE ON DESIGN: this is a same-day relationship estimate, not a future
+# forecast. Same-day market and macro indicators may not be available at the
+# time a deployable prediction is needed; use forecast_future.py for the
+# lagged, recursive forecasting example.
 
 # Rolling/short-term smoothed versions of the macro indicators themselves
 # (not of the target) -- captures short-term trend context without leaking
@@ -89,7 +93,7 @@ sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="coolwarm", center=0,
             square=True, linewidths=0.5, cbar_kws={"shrink": 0.8})
 plt.title("Correlation Matrix: Gold Price (INR) vs Economic/Financial Features", fontsize=13)
 plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/correlation_heatmap.png")
+plt.savefig(OUT_DIR / "correlation_heatmap.png")
 plt.close()
 
 target_corr = corr_matrix["Gold_Price_INR"].drop("Gold_Price_INR").sort_values(key=abs, ascending=False)
@@ -104,7 +108,7 @@ print(target_corr)
 # relationship).
 FEATURES = [
     "Silver_Price", "USD_Index", "Crude_Oil_Price", "SP500",
-    "Interest_Rate", "Inflation_Rate", "VIX",
+    "Interest_Rate", "Inflation_Rate", "VIX", "USD_INR",
     "Real_Interest_Rate", "Oil_to_USD_Ratio", "Silver_to_Oil_Ratio",
     "Market_Stress_Index", "USD_Index_MA7", "SP500_MA7", "Crude_Oil_MA7",
     "USD_Index_Pct_Change_7d", "Month", "Quarter",
@@ -115,17 +119,17 @@ X = df_model[FEATURES]
 y = df_model[TARGET]
 
 # =================================================================
-# 4. TRAIN / TEST SPLIT (random 80/20 split of the evaluation dataset)
+# 4. CHRONOLOGICAL HOLDOUT
+# The same-day macro variables make this a retrospective estimate, not a
+# deployable future forecast. Keep the newest 20% entirely out of training.
 # =================================================================
-from sklearn.model_selection import train_test_split
-
-X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
-    X, y, df_model.index, test_size=0.2, random_state=42
-)
-dates_test = df_model.loc[idx_test, "Date"]
-
-# sort test set by date purely for a cleaner actual-vs-predicted line plot
-_sort_order = dates_test.argsort()
+split_idx = int(len(df_model) * 0.8)
+if split_idx < 1 or split_idx >= len(df_model):
+    raise ValueError("Not enough rows for an 80/20 chronological split")
+X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+dates_test = df_model["Date"].iloc[split_idx:]
+_sort_order = np.argsort(dates_test.to_numpy())
 
 print(f"\nTrain size: {len(X_train)}  |  Test size: {len(X_test)}")
 
@@ -154,19 +158,18 @@ def evaluate(y_true, y_pred, label):
     mae = mean_absolute_error(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     mape = mean_absolute_percentage_error(y_true, y_pred)
-    reliability = r2 * 100  # "prediction reliability %" reported as R2-based score
     print(f"\n--- {label} Performance ---")
     print(f"R2 Score            : {r2:.4f}")
     print(f"MAE                 : Rs. {mae:,.2f}")
     print(f"RMSE                : Rs. {rmse:,.2f}")
     print(f"MAPE                : {mape*100:.2f}%")
-    print(f"Prediction Reliability: {reliability:.2f}%")
-    return {"r2": r2, "mae": mae, "rmse": rmse, "mape": mape, "reliability_pct": reliability}
+    print("Note: R2 is a fit metric, not a probability or reliability percentage.")
+    return {"r2": r2, "mae": mae, "rmse": rmse, "mape": mape}
 
 train_metrics = evaluate(y_train, y_pred_train, "TRAIN")
 test_metrics = evaluate(y_test, y_pred_test, "TEST")
 
-with open(f"{OUT_DIR}/metrics.json", "w") as f:
+with open(OUT_DIR / "metrics.json", "w", encoding="utf-8") as f:
     json.dump({"train": train_metrics, "test": test_metrics}, f, indent=2)
 
 # =================================================================
@@ -182,7 +185,7 @@ sns.barplot(x=importances.values, y=importances.index, hue=importances.index,
 plt.title("Random Forest - Feature Importance")
 plt.xlabel("Importance")
 plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/feature_importance.png")
+plt.savefig(OUT_DIR / "feature_importance.png")
 plt.close()
 
 # =================================================================
@@ -200,7 +203,7 @@ plt.xlabel("Date")
 plt.ylabel("Gold Price (Rs. per 10g)")
 plt.legend()
 plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/actual_vs_predicted.png")
+plt.savefig(OUT_DIR / "actual_vs_predicted.png")
 plt.close()
 
 plt.figure(figsize=(6.5, 6.5))
@@ -212,11 +215,11 @@ plt.ylabel("Predicted Gold Price (Rs. per 10g)")
 plt.title("Actual vs Predicted Scatter (Test Set)")
 plt.legend()
 plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/scatter_actual_vs_predicted.png")
+plt.savefig(OUT_DIR / "scatter_actual_vs_predicted.png")
 plt.close()
 
 # =================================================================
 # 9. SAVE MODEL
 # =================================================================
-joblib.dump(rf_model, f"{OUT_DIR}/gold_price_rf_model.pkl")
+joblib.dump(rf_model, OUT_DIR / "gold_price_rf_model.pkl")
 print(f"\nModel and plots saved to {OUT_DIR}")

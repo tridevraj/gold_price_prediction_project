@@ -28,6 +28,7 @@ values for those indicators (e.g. from economic forecasts or your own
 scenario assumptions).
 """
 
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -36,14 +37,22 @@ import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 
-DATA_PATH = "data/gold_price_dataset.csv"
-OUT_DIR = "outputs"
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_PATH = PROJECT_DIR / "data" / "gold_price_dataset.csv"
+OUT_DIR = PROJECT_DIR / "outputs"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 FORECAST_DAYS = 10  # how many business days ahead to forecast
 
 # =================================================================
 # 1. LOAD DATA
 # =================================================================
 df = pd.read_csv(DATA_PATH, parse_dates=["Date"])
+required = {"Date", "Gold_Price_INR", "Silver_Price", "USD_Index", "Crude_Oil_Price", "SP500", "Interest_Rate", "Inflation_Rate", "VIX"}
+missing = required.difference(df.columns)
+if missing:
+    raise ValueError(f"Dataset is missing required columns: {sorted(missing)}")
+if df["Date"].isna().any() or df["Date"].duplicated().any():
+    raise ValueError("Date must contain valid, unique observations")
 df = df.sort_values("Date").reset_index(drop=True)
 
 # =================================================================
@@ -118,7 +127,7 @@ print("\n--- One-step-ahead forecast accuracy (on unseen future period) ---")
 print(f"R2 Score : {r2:.4f}")
 print(f"MAE      : Rs. {mae:,.2f}")
 print(f"RMSE     : Rs. {rmse:,.2f}")
-print(f"Prediction Reliability: {r2*100:.2f}%")
+print("R2 is a fit metric, not a prediction reliability percentage.")
 
 # =================================================================
 # 5. MULTI-STEP FUTURE FORECAST (iterative / recursive)
@@ -142,6 +151,8 @@ def forecast_future_prices(df_full, model, n_days=30):
     diff_history = list(history["Gold_Price_Diff"].dropna().values[-15:])
 
     last_date = history["Date"].iloc[-1]
+    if n_days <= 0:
+        raise ValueError("n_days must be a positive integer")
     future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=n_days)
 
     for date in future_dates:
@@ -150,7 +161,7 @@ def forecast_future_prices(df_full, model, n_days=30):
             feat[f"Diff_Lag{lag}"] = diff_history[-lag]
         feat["Diff_RollMean5"] = np.mean(diff_history[-5:])
         feat["Diff_RollMean10"] = np.mean(diff_history[-10:])
-        feat["Diff_RollStd10"] = np.std(diff_history[-10:])
+        feat["Diff_RollStd10"] = np.std(diff_history[-10:], ddof=1)
         for col in macro_cols:
             feat[f"{col}_Lag1"] = macro_future[col]
 
@@ -165,7 +176,7 @@ def forecast_future_prices(df_full, model, n_days=30):
     return pd.DataFrame(forecasts)
 
 forecast_df = forecast_future_prices(df_model, forecast_model, n_days=FORECAST_DAYS)
-forecast_df.to_csv(f"{OUT_DIR}/future_forecast.csv", index=False)
+forecast_df.to_csv(OUT_DIR / "future_forecast.csv", index=False)
 
 last_10 = df_model[["Date", "Gold_Price_INR"]].tail(10).copy()
 last_10["Date"] = last_10["Date"].dt.strftime("%Y-%m-%d")
@@ -211,7 +222,7 @@ plt.xlabel("Date")
 plt.ylabel("Gold Price (Rs. per 10g)")
 plt.legend()
 plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/future_forecast.png")
+plt.savefig(OUT_DIR / "future_forecast.png")
 plt.close()
 
 print(f"Saved forecast chart to {OUT_DIR}/future_forecast.png")
